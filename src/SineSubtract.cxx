@@ -855,12 +855,24 @@ FFTtools::SineSubtract::SineSubtract(const TGraph * gmp, int maxiter, bool store
 
 
 
-FFTtools::SineSubtract::SineSubtract(int maxiter, double min_power_reduction, bool store)
+FFTtools::SineSubtract::SineSubtract(double ** base_fft, int maxiter, double min_power_reduction, bool store)
+//FFTtools::SineSubtract::SineSubtract(int maxiter, double min_power_reduction, bool store)
   : abs_maxiter(0), maxiter(maxiter), max_successful_iter(0),
     min_power_reduction(min_power_reduction), store(store),
     power_estimator_params(0), peak_option_params(0), envelope_option_params(0) 
 
 {
+
+  //! this should be dBm/Hz scale
+  int base_len = sizeof(*base_fft) / sizeof(**base_fft);
+  baseline_fft.resize(16);
+  for (int i = 0; i < base_len; i++) {
+    for (int j = 0; j < 16; j++) {
+      baseline_fft[j].push_back(base_fft[i][j]); 
+    }
+  }
+  //TGraph * base = new TGraph(base_len, base_freq, base_fft);
+  //baseline = base; 
 
   setPowerSpectrumEstimator(FFT); 
   setPeakFindingOption(NEIGHBORFACTOR); 
@@ -927,7 +939,7 @@ void FFTtools::SineSubtract::reset()
 
 
 }
-
+/*
 TGraph * FFTtools::SineSubtract::subtractCW(const TGraph * g, double dt, const SineSubtractResult* result) 
 {
   TGraph * gcopy = new TGraph(g->GetN(), g->GetX(), g->GetY()); 
@@ -935,9 +947,10 @@ TGraph * FFTtools::SineSubtract::subtractCW(const TGraph * g, double dt, const S
   subtractCW(1,&gcopy,dt, NULL, result);
   return gcopy; 
 }
+*/
 
-
-double * FFTtools::SineSubtract::subtractCW(int N, const double * y, double dt, double * yout,  const SineSubtractResult* result) 
+double * FFTtools::SineSubtract::subtractCW(int N, const double * y, double dt, int pad_len, int * bad_idxs, double thres, int ant, double * yout,  const SineSubtractResult* result) 
+//double * FFTtools::SineSubtract::subtractCW(int N, const double * x, const double * y, double dt, int idxs, double * yout,  const SineSubtractResult* result) 
 {
   TGraph g(N); 
   for (int i = 0; i < N;i ++) 
@@ -946,7 +959,7 @@ double * FFTtools::SineSubtract::subtractCW(int N, const double * y, double dt, 
     g.GetY()[i] = y[i]; 
   }
   TGraph *gptr = &g;
-  subtractCW(1,&gptr,-1,NULL,result); 
+  subtractCW(1, &gptr, dt, pad_len, bad_idxs, thres, ant, NULL, result); 
   if (!yout) 
   {
     yout = new double[N]; 
@@ -955,8 +968,7 @@ double * FFTtools::SineSubtract::subtractCW(int N, const double * y, double dt, 
   return yout; 
 }
 
-
-void FFTtools::SineSubtract::subtractCW(int ntraces, TGraph ** g, double dt, const double * w, const SineSubtractResult* result) 
+void FFTtools::SineSubtract::subtractCW(int ntraces, TGraph ** g, double dt, int pad_len, int * bad_idxs, double thres, int ant, const double * w, const SineSubtractResult* result) 
 {
 
 
@@ -966,412 +978,145 @@ void FFTtools::SineSubtract::subtractCW(int ntraces, TGraph ** g, double dt, con
 #endif
   fitter.deleteEvalRecords();
   reset(); 
-  double orig_dt = dt;
 
-  if (dt<=0) dt = g[0]->GetX()[1] - g[0]->GetX()[0]; 
-
-  int low = tmin < 0 || tmin >= g[0]->GetN() ? 0 : tmin; 
-  int high[ntraces];  
-
-  int Nuse[ntraces];
-
-  int NuseMax = 0; 
-
-  //zero mean and compute power at the same time. 
-  double power = 0; 
-  for (int ti = 0; ti < ntraces; ti++) 
-  {
-    high[ti] = tmax <= 0 || tmax > g[ti]->GetN() ? g[ti]->GetN() : tmax; 
-    Nuse[ti] = high[ti] - low; 
-
-    if (Nuse[ti] > NuseMax) NuseMax = Nuse[ti]; 
-
-    double mean = g[ti]->GetMean(2); 
-    for (int i = low; i <high[ti] ; i++)
-    {
-      g[ti]->GetY()[i] -=mean; 
-      power += g[ti]->GetY()[i] * g[ti]->GetY()[i] / Nuse[ti]; 
-    }
+  //! t-domain configuration
+  if (dt<=0) dt = g[0]->GetX()[1] - g[0]->GetX()[0];
+  int low = tmin < 0 || tmin >= g[0]->GetN() ? 0 : tmin; ///< t0 setting. in case user want to test only part of wf, pls set the tmin and tmax
+  int high[ntraces]; ///< t last setting
+  int Nuse[ntraces]; ///< number of wf bins
+  int NuseMax = 0; ///< number of final wf bins 
+  for (int ti = 0; ti < ntraces; ti++) {
+    //! set t last and number of bins
+    high[ti] = tmax <= 0 || tmax > g[ti]->GetN() ? g[ti]->GetN() : tmax;
+    Nuse[ti] = high[ti] - low;
+    if (Nuse[ti] > NuseMax) NuseMax = Nuse[ti];
   }
+  int fin_len = pad_len ? pad_len : NuseMax; ///< let set practical wf length we will use
 
-  r.powers.push_back(power/ntraces);
+  //! f-domain configuration
+  int spectrum_N = pad_len ?  pad_len / 2 + 1 : NuseMax / 2 + 1;
+  double df = pad_len ? 1./(pad_len * dt) : 1./(NuseMax * dt);
+  r.phases.insert(r.phases.end(),ntraces, std::vector<double>());
+  r.phases_errs.insert(r.phases_errs.end(),ntraces, std::vector<double>());
+  r.amps.insert(r.amps.end(),ntraces, std::vector<double>());
+  r.amps_errs.insert(r.amps_errs.end(),ntraces, std::vector<double>());
 
-  if(result){
-    double diff = TMath::Abs(power/ntraces - result->powers.at(0));
-    if(diff > 1e-12){
-      static int numError = 0;
-      const int maxError = 100;
-      if(numError < maxError){
-        std::cerr << "Warning " <<  (numError+1) << " of " << maxError << " in " << __PRETTY_FUNCTION__
-                  << ",  potential mismatch between input result and calculated power. Difference is "
-                  << diff << std::endl;
-        std::cerr << "Will do recalculation!" << std::endl;
-        numError++;
-      }
-    }
-    result = NULL;
-  }
-
-  if (store) 
-  {
-    gs.insert(gs.end(), ntraces, std::vector<TGraph*>()); 
-    env_gs.insert(env_gs.end(), ntraces, std::vector<TGraph*>()); 
-    for (int i = 0; i < ntraces; i++) 
-    {
-      g[i]->SetTitle(TString::Format("Initial Waveform %d",i)); 
-      gs[i].push_back(new TGraph(g[i]->GetN(), g[i]->GetX(), g[i]->GetY())); 
-    }
-  }
-
-  int ntries = 0; 
-
-  double hf = high_factor; 
-  double fnyq = 1./(2*dt); 
-  if (fmax.size()) hf = std::min(*std::max_element(fmax.begin(), fmax.end()) / fnyq, high_factor); 
-
-  double pad_scale_factor = 1; 
-  if (power_estimator == FFT) pad_scale_factor = (1+power_estimator_params[FFT_NPAD]); 
-
-
-  int spectrum_N = power_estimator == FFT ? (pad_scale_factor*NuseMax)/2 + 1
-                                          : NuseMax * power_estimator_params[LS_OVERSAMPLE_FACTOR] * hf / 2; 
-
-
-  std::vector<int> nfails(spectrum_N); 
-
-  TGraph* power_spectra[ntraces]; 
-  TGraph* fft_phases[ntraces]; // not all power estimation options use this
-  for (int i = 0; i < ntraces; i++) 
-  {
-    power_spectra[i] = new TGraph(spectrum_N);  
-    fft_phases[i] = 0; 
-  }
-
-
-  r.phases.insert(r.phases.end(),ntraces, std::vector<double>()); 
-  r.phases_errs.insert(r.phases_errs.end(),ntraces, std::vector<double>()); 
-  r.amps.insert(r.amps.end(),ntraces, std::vector<double>()); 
-  r.amps_errs.insert(r.amps_errs.end(),ntraces, std::vector<double>()); 
-
-  int nattempts = 0; 
-
-
-  /** We need padded copies of traces if they don't all have the same length
-   * so that the spectrum has the same bins (or if we want to pad for extra resolution)
-   *
-   **/ 
-  TGraph * gPadded[ntraces]; 
-  memset(gPadded,0,sizeof(gPadded)); 
-
-  // double * envelopes[ntraces] = {0};
-  std::vector<double*> envelopes(ntraces, NULL);  
-
-  for (int ti = 0; ti < ntraces; ti++)
-  {
-    if (Nuse[ti] < NuseMax || pad_scale_factor > 1.)
-    {
-      gPadded[ti] = new TGraph(NuseMax * pad_scale_factor); 
-
+  //! wf padding
+  TGraph * gPadded[ntraces]; ///< preparing empty pad for testing subtraction results
+  memset(gPadded,0,sizeof(gPadded));
+  for (int ti = 0; ti < ntraces; ti++) {
+    if (Nuse[ti] < NuseMax || pad_len > NuseMax) {
+      gPadded[ti] = new TGraph(pad_len);
       memcpy(gPadded[ti]->GetX(), g[ti]->GetX(), Nuse[ti] *sizeof(double));
       memcpy(gPadded[ti]->GetY(), g[ti]->GetY(), Nuse[ti] *sizeof(double));
-
-      for (int i = Nuse[ti]; i < gPadded[ti]->GetN(); i++) 
-      {
-        gPadded[ti]->GetX()[i] = gPadded[ti]->GetX()[i-1] + dt; 
-        gPadded[ti]->GetY()[i] = 0; //should be unnecessary 
+      for (int i = Nuse[ti]; i < gPadded[ti]->GetN(); i++) {
+        gPadded[ti]->GetX()[i] = gPadded[ti]->GetX()[i-1] + dt;
+        gPadded[ti]->GetY()[i] = 0; //should be unnecessary
       }
-    }
-
-    if (envelope_option != ENV_NONE) 
-    {
-      envelopes[ti] = new double[g[ti]->GetN()]; 
-    }
-    else
-    {
-      envelopes[ti] = 0; 
-
     }
   }
 
+  //! choose padded or not padded wf
+  TGraph * ig[ntraces];
+  for (int ti = 0; ti  < ntraces; ti++) {
+    ig[ti] = gPadded[ti] ? gPadded[ti] : g[ti]; ///< choose padded or not padded wf
+  }
 
-  int rIter = 0; // only gets incremented inside this while loop in the case of non-NULL input result
-  const int nRIter = result ? result->freqs.size() : 1; // effectively making this a while(true) loop for NULL input result
-  while(rIter < nRIter) 
+  //! counting tries and failes
+  int bads = sizeof(bad_idxs) / sizeof(bad_idxs[0]);
+  std::vector<int> nfails(bads);
+  while(bads != 0) 
   {
-    nattempts++; 
 
+    //! pick guess index
+    int bad_idx;
+    int bad_idx_idx;
+    for (int b = 0; b < bads; b++) {
+      if (bad_idxs[b] > -1) {
+        bad_idx = bad_idxs[b];
+        bad_idx_idx = b;
+        break;
+      }
+    }
+
+    //! making fft and pick up guess
+    double guess_ph[ntraces];
+    double guess_A = 0;
+    double guess_f = bad_idx * df;
     for (int ti = 0; ti  < ntraces; ti++)
     {
-
-
-      if (envelope_option == ENV_HILBERT) 
-      {
-         computeEnvelopeHilbert(g[ti], envelopes[ti],dt);  
-      }
-      else if (envelope_option == ENV_RMS)
-      {
-        FFTtools::rmsEnvelope(g[ti]->GetN(), envelope_option_params[ENV_RMS_WINDOW], g[ti]->GetX(), g[ti]->GetY(), envelopes[ti]);
-      }
-      else if (envelope_option == ENV_PEAK)
-      {
-
-        FFTtools::peakEnvelope(g[ti]->GetN(), envelope_option_params[ENV_PEAK_MINDISTANCE], g[ti]->GetX(), g[ti]->GetY(), envelopes[ti]);
-      }
-
-      /*all of the params have the peak order as the first paramter (by construction!) */
-      if (envelope_option != ENV_NONE && envelope_option_params[0] >=0) 
-      {
-        computeEnvelopeFit((int) envelope_option_params[0], g[ti]->GetN(), g[ti]->GetX(), envelopes[ti],  envelopes[ti]); 
-      }
-
-
-      TGraph * take_spectrum_of_this = gPadded[ti] ? gPadded[ti] : g[ti];  
-
-      if (power_estimator == LOMBSCARGLE)
-      {
-
-         FFTtools::lombScarglePeriodogram(NuseMax, dt, take_spectrum_of_this->GetX() + low, take_spectrum_of_this->GetY() + low, power_estimator_params[LS_OVERSAMPLE_FACTOR], hf, power_spectra[ti]);
-      }
-      else //FFT 
-      {
-        double df = 1./(NuseMax * dt * pad_scale_factor); 
-        if (fft_phases[ti] == 0)
-        {
-          fft_phases[ti] = new TGraph(spectrum_N); 
-        }
-
-        TGraph * ig = take_spectrum_of_this; 
-        if (orig_dt > 0) // must interpolate
-        {
-          ig = FFTtools::getInterpolatedGraph(take_spectrum_of_this, dt); 
-          ig->Set(NuseMax * pad_scale_factor);  // ensure same length
-        }
-
-        FFTWComplex * the_fft = FFTtools::doFFT(NuseMax * pad_scale_factor, ig->GetY() + low); 
-
-        for (int i = 0; i < spectrum_N; i++)
-        {
-          power_spectra[ti]->GetY()[i] = the_fft[i].getAbsSq() / NuseMax / 16 / pad_scale_factor; //why was this factor of 16 here? 
-          if (i > 0 && i <spectrum_N-1) power_spectra[ti]->GetY()[i] *=2; 
-          fft_phases[ti]->GetY()[i] = the_fft[i].getPhase(); 
-          power_spectra[ti]->GetX()[i] = df *i; 
-          fft_phases[ti]->GetX()[i] = df *i; 
-        }
-
-
-        delete [] the_fft; 
-
-        if (orig_dt > 0)
-        {
-          delete ig; 
-        }
-      }
-
+      FFTWComplex * the_fft = FFTtools::doFFT(fin_len, ig[ti]->GetY() + low);
+      guess_ph[ti] = the_fft[bad_idx].getPhase();
+      guess_A += sqrt(the_fft[bad_idx].getAbsSq() / NuseMax);
+      if (bad_idx > 0 && bad_idx < spectrum_N - 1) guess_A *= sqrt(2);
+      delete [] the_fft;
+    } // got a power estimate for it in ntraces!
       
-    } // got a power estimate for it in ntraces, and calculated envelope parameters!
-
-
-
-    std::vector<double> mag_sum(spectrum_N); 
-
-    double * spectra_x=0, *spectra_y=0; 
-
-    if (store)
-    {
-      spectra_x  = new double[spectrum_N]; 
-      spectra_y  = new double[spectrum_N]; 
-    }
-
-    //sum up all the spectra
-    
-    for (int ti = 0; ti < ntraces; ti++) 
-    {
-      for (int i = 0; i < spectrum_N; i++)
-      {
-         mag_sum[i] += power_spectra[ti]->GetY()[i];
+    //! minimization
+    const double * x[ntraces]; ///< take out all value from Tgraph to array
+    const double * y[ntraces];
+    TGraph * xy_crop = new TGraph(NuseMax);
+    for (int ti = 0; ti < ntraces; ti++) {
+      for (int i = 0; i < NuseMax; i++) {
+        xy_crop->GetX()[i] = ig[ti]->GetX()[i]+low;
+        xy_crop->GetY()[i] = ig[ti]->GetY()[i]+low;
       }
+      x[ti] = xy_crop->GetX();
+      y[ti] = xy_crop->GetY();
     }
+    fitter.setGuess(guess_f, ntraces, guess_ph, guess_A); ///< lots of things are happening inside of this function...
+    fitter.doFit(ntraces, Nuse, x,y,w, 0); ///< also here too...
+    delete xy_crop;
 
-    
-    if (store)
-    {
-      for (int i = 0; i < spectrum_N; i++)
-      {
-         spectra_x[i] = power_spectra[0]->GetX()[i]; 
-         spectra_y[i] = mag_sum[i]/ntraces; 
-      }
-    }
-
-    // find the maximum 
-    int max_i = findMaxFreq(spectrum_N, power_spectra[0]->GetX(), &mag_sum[0], &nfails[0]); 
-    double max_f = power_spectra[0]->GetX()[max_i]; 
-
-    if (verbose) 
-      printf("max_freq (ntries: %d nattempts: %d): %d %g\n",ntries, nattempts, max_i, max_f); 
-
-
-
-    if ( (abs_maxiter > 0 && nattempts > abs_maxiter)
-        || (max_successful_iter > 0 && int(r.freqs.size()) >= max_successful_iter)
-        || max_i < 0) 
-    {
-      if (store) 
-      {
-        spectra.push_back(new TGraph(spectrum_N,spectra_x, spectra_y)); 
-        spectra[spectra.size()-1]->SetTitle(TString::Format("Spectrum after %lu iterations",r.powers.size()-1)); 
-        delete [] spectra_x; 
-        delete [] spectra_y; 
-      }
-
- 
-      break; 
-    }
-
-
-
-    double guess_ph[ntraces]; 
-    double guess_A = 0; 
-
+    //! subtraction
+    //! bring the fit results into earth
+    double freq_temp = fitter.getFreq();
+    double amp_temp[ntraces];
+    double phase_temp[ntraces];
+    double sub_A = 0;
+    r.freqs.push_back(freq_temp);
+    r.freqs_errs.push_back(fitter.getFreqErr());
     for (int ti = 0; ti < ntraces; ti++)
     {
-      guess_ph[ti] = fft_phases[ti] ? fft_phases[ti]->GetY()[max_i] : guessPhase(g[ti], max_f); 
-
-      guess_A += sqrt(power_spectra[ti]->GetY()[max_i]) / ntraces; 
-    }
-
-
-
-    fitter.setGuess(max_f, ntraces, guess_ph, guess_A); 
-
-    const double * x[ntraces];
-    const double * y[ntraces];
-
-    for (int i = 0; i < ntraces; i++) 
-    {
-      x[i] = g[i]->GetX()+low; 
-      y[i] = g[i]->GetY()+low; 
-    }
-
-    // fitter.doFit(ntraces, Nuse, x,y,w, envelope_option == ENV_NONE? 0 : (const double **) envelopes);
-
-    if(!result){
-      fitter.doFit(ntraces, Nuse, x,y,w, envelope_option == ENV_NONE? 0 : (const double **) &envelopes[0]);
-
-      //    printf("power before:%f\n", power); 
-      power = fitter.getPower(); 
-      //    printf("power after:%f\n", power);
-
-
-      double ratio = 1. - power /r.powers[r.powers.size()-1]; 
-      if (verbose) printf("Power Ratio: %f\n", ratio); 
-
-
-      double mpr = g_min_power ? g_min_power->Eval(max_f) : min_power_reduction; 
-
-
-      if(store && (ratio >= mpr || ntries == maxiter))
-      {
-        spectra.push_back(new TGraph(spectrum_N,spectra_x, spectra_y)); 
-        if (r.powers.size() > 1)
-        {
-          spectra[spectra.size()-1]->SetTitle(TString::Format("Spectrum after %lu iterations",r.powers.size()-1)); 
-        }
-        else
-        {
-          spectra[spectra.size()-1]->SetTitle("Initial spectrum"); 
-        }
-
-        delete [] spectra_x; 
-        delete [] spectra_y; 
+      amp_temp[ti] = fitter.getAmp()[ti];
+      phase_temp[ti] = fitter.getPhase()[ti];
+      r.phases[ti].push_back(phase_temp[ti]);
+      r.phases_errs[ti].push_back(fitter.getPhaseErr()[ti]);
+      r.amps[ti].push_back(amp_temp[ti]);
+      r.amps_errs[ti].push_back( fitter.getAmpErr()[ti]);
+      double A = w ? w[ti] * amp_temp[ti] : amp_temp[ti];
+      for (int i = 0; i < fin_len; i++) {
+        if (i < NuseMax) ig[ti]->GetY()[i] -= A * sin(2*TMath::Pi() * freq_temp *ig[ti]->GetX()[i] + phase_temp[ti]);
+        else ig[ti]->GetY()[i] = 0;
       }
-
-
     
-
-
-      if (ratio < mpr || std::isnan(mpr))
-      {
-        nfails[max_i]++; 
-        if ((++ntries) > maxiter)   
-        {
-          break;
-        }
-        continue; 
-      }
-      ntries = 0; // restart clock
-
-      r.powers.push_back(power); 
-      r.freqs.push_back(fitter.getFreq()); 
-      r.freqs_errs.push_back(fitter.getFreqErr()); 
-
-
-      for (int i = 0; i < ntraces; i++) 
-      {
-        r.phases[i].push_back(fitter.getPhase()[i]); 
-        r.phases_errs[i].push_back(fitter.getPhaseErr()[i]); 
-        r.amps[i].push_back(fitter.getAmp()[i]); 
-        r.amps_errs[i].push_back( fitter.getAmpErr()[i]); 
-      }
-    } // if(!result)
-    else{ // we have an input result, so use it
-      
-      r.powers.push_back(result->powers[rIter+1]);
-      r.freqs.push_back(result->freqs[rIter]);
-      r.freqs_errs.push_back(result->freqs_errs[rIter]); 
-
-      for (int i = 0; i < ntraces; i++) 
-      {
-        r.phases[i].push_back(result->phases[i][rIter]); 
-        r.phases_errs[i].push_back(result->phases_errs[i][rIter]); 
-        r.amps[i].push_back(result->amps[i][rIter]);
-        r.amps_errs[i].push_back(result->amps_errs[i][rIter]);
-      }
-      rIter++; // increment this iter
-    }
-    
-
-    for (int ti = 0; ti < ntraces; ti++) 
-    {
-      double A = w ? w[ti] * r.amps[ti].back() : r.amps[ti].back(); 
-      for (int i = 0; i < g[ti]->GetN(); i++) 
-      {
-        double AA = envelopes[ti] ?  A * envelopes[ti][i] : A; 
-        g[ti]->GetY()[i] -= AA* sin(2*TMath::Pi() * r.freqs.back() *g[ti]->GetX()[i] + r.phases[ti].back()); 
-      }
-
-      if (store)  
-      {
-        //add sine we subtracted to previous graph 
-        
-        
-        fnLock.Lock(); 
-        TF1 * fn = new TF1(TString::Format("fitsin_%d_%lu_%d",fnCount++, r.powers.size(),ti), "[0] * sin(2*pi*[1] * x + [2])",g[ti]->GetX()[0], g[ti]->GetX()[g[ti]->GetN()-1]); 
-        fnLock.UnLock(); 
-        fn->SetParameter(0,r.amps[ti].back()); 
-        fn->SetParameter(1,r.freqs.back()); 
-        fn->SetParameter(2,r.phases[ti].back()); 
-        fn->SetNpx(2*g[ti]->GetN()); 
-        gs[ti][gs[ti].size()-1]->GetListOfFunctions()->Add(fn); 
-
-        //add new graph 
-        g[ti]->SetTitle(TString::Format("Wf %d after %lu iterations",ti, r.powers.size()-1)); 
-        gs[ti].push_back(new TGraph(*g[ti])); 
-
-        if (envelopes[ti]) 
-          env_gs[ti].push_back(new TGraph(g[ti]->GetN(), g[ti]->GetX(), envelopes[ti])); 
-      }
-
+      //! fft after subtraction
+      FFTWComplex * the_fft = FFTtools::doFFT(fin_len, ig[ti]->GetY() + low);
+      sub_A += sqrt(the_fft[bad_idx].getAbsSq() / NuseMax);
+      if (bad_idx > 0 && bad_idx < spectrum_N - 1) sub_A *= sqrt(2);
+      delete [] the_fft;
     }
 
+    //! threhold check
+    double ratio = log10(sub_A) - log10(baseline_fft[ant][bad_idx]);
+    if (ratio < thres) {
+      bad_idxs[bad_idx_idx] = -1; 
+      bads -= 1;
+    } else {
+      nfails[bad_idx_idx]++;
+      if (nfails[bad_idx_idx] > 2) {
+        bad_idxs[bad_idx_idx] = -1;
+        bads -= 1;
+      }
+    } 
+  }///< end of while loop
 
-  }
-
-  for (int i = 0; i < ntraces; i++) 
-  { 
-    if (gPadded[i]) delete gPadded[i]; 
-    delete power_spectra[i];
-    if (envelope_option != ENV_NONE) delete envelopes[i]; 
-    if (fft_phases[i]) delete fft_phases[i]; 
+  //! cleanup the mass
+  for (int ti = 0; ti < ntraces; ti++) { 
+    for (int i = 0; i < g[ti]->GetN(); i++) {
+      g[ti]->GetY()[i] = ig[ti]->GetY()[i]; ///< time to replace otiginal wf
+    }
+    if (gPadded[ti]) delete gPadded[ti]; 
   }
 #ifdef SINE_SUBTRACT_PROFILE
   printf("Time for SineSubtract::subtractCW(): "); 

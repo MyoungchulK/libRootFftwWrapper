@@ -401,7 +401,8 @@ namespace FFTtools
          *  @param store If true, intermediate steps will be saved. This incurs some overhead, so is mostly useful for making pretty plots and diagnostics. 
          *
          */
-        SineSubtract(int max_iter_without_reduction = 3, double min_power_reduction = 0.05, bool store = false); 
+        SineSubtract(double ** base_fft, int max_iter_without_reduction = 3, double min_power_reduction = 0.05, bool store = false); 
+        //SineSubtract(int max_iter_without_reduction = 3, double min_power_reduction = 0.05, bool store = false); 
 
 
         /** Create a new SineSubtract. A few options may be set here, although they can all be changed by setters later too 
@@ -440,7 +441,7 @@ namespace FFTtools
          *  @param result if you already have the result, this just performs the transformations in the result 
          *  @returns waveform with subtracted CW. Either allocates new or uses y_out, depending on if y_out is NULL
          * */ 
-        double * subtractCW(int N, const double * y, double dt, double * y_out = NULL, const SineSubtractResult *result = NULL ); 
+        double * subtractCW(int N, const double * y, double dt, int pad_len, int * bad_idxs, double thres, int ant, double * y_out = NULL, const SineSubtractResult *result = NULL ); 
 
 
         /** Subtract CW from one or more traces. Sine Subtraction can handle both evenly-spaced and unevenly-spaced waveforms.
@@ -455,7 +456,7 @@ namespace FFTtools
          *  @param w Scales for the input values. If the y-axis have different scales (different gains or units) you should pass an array here. If 0, everything is equally-weighted. 
          *
          */
-        void subtractCW(int ng, TGraph ** g, double dt, const double * w = 0, const SineSubtractResult* result = NULL); 
+        void subtractCW(int ng, TGraph ** g, double dt, int pad_len, int * bad_idxs, double thres, int ant, const double * w = 0, const SineSubtractResult* result = NULL); 
 
         /** Set limits on the frequencies to try to subtract. If the units of the graph are in ns, the frequencies should be in GHz. 
          *
@@ -738,6 +739,10 @@ namespace FFTtools
         double * envelope_option_params; 
 
         const TGraph * g_min_power; 
+
+        //! baseline
+        std::vector<std::vector<double>> baseline_fft;
+        //const TGraph * baseline;
 
         bool verbose; 
         void reset(); 
