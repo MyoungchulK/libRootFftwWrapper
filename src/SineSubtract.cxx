@@ -855,7 +855,7 @@ FFTtools::SineSubtract::SineSubtract(const TGraph * gmp, int maxiter, bool store
 
 
 
-FFTtools::SineSubtract::SineSubtract(double ** base_fft, int maxiter, double min_power_reduction, bool store)
+FFTtools::SineSubtract::SineSubtract(int fft_len, double base_fft[][16], int maxiter, double min_power_reduction, bool store)
 //FFTtools::SineSubtract::SineSubtract(int maxiter, double min_power_reduction, bool store)
   : abs_maxiter(0), maxiter(maxiter), max_successful_iter(0),
     min_power_reduction(min_power_reduction), store(store),
@@ -864,15 +864,12 @@ FFTtools::SineSubtract::SineSubtract(double ** base_fft, int maxiter, double min
 {
 
   //! this should be dBm/Hz scale
-  int base_len = sizeof(*base_fft) / sizeof(**base_fft);
   baseline_fft.resize(16);
-  for (int i = 0; i < base_len; i++) {
-    for (int j = 0; j < 16; j++) {
+  for (int j = 0; j < 16; j++) {
+    for (int i = 0; i < fft_len; i++) {
       baseline_fft[j].push_back(base_fft[i][j]); 
     }
   }
-  //TGraph * base = new TGraph(base_len, base_freq, base_fft);
-  //baseline = base; 
 
   setPowerSpectrumEstimator(FFT); 
   setPeakFindingOption(NEIGHBORFACTOR); 
@@ -949,8 +946,7 @@ TGraph * FFTtools::SineSubtract::subtractCW(const TGraph * g, double dt, const S
 }
 */
 
-double * FFTtools::SineSubtract::subtractCW(int N, const double * y, double dt, int pad_len, int * bad_idxs, double thres, int ant, double * yout,  const SineSubtractResult* result) 
-//double * FFTtools::SineSubtract::subtractCW(int N, const double * x, const double * y, double dt, int idxs, double * yout,  const SineSubtractResult* result) 
+double * FFTtools::SineSubtract::subtractCW(int N, const double * y, double dt, int pad_len, int * bad_idxs, int bad_len, double thres, int ant, double * yout,  const SineSubtractResult* result) 
 {
   TGraph g(N); 
   for (int i = 0; i < N;i ++) 
@@ -959,7 +955,7 @@ double * FFTtools::SineSubtract::subtractCW(int N, const double * y, double dt, 
     g.GetY()[i] = y[i]; 
   }
   TGraph *gptr = &g;
-  subtractCW(1, &gptr, dt, pad_len, bad_idxs, thres, ant, NULL, result); 
+  subtractCW(1, &gptr, dt, pad_len, bad_idxs, bad_len, thres, ant, NULL, result); 
   if (!yout) 
   {
     yout = new double[N]; 
@@ -968,7 +964,7 @@ double * FFTtools::SineSubtract::subtractCW(int N, const double * y, double dt, 
   return yout; 
 }
 
-void FFTtools::SineSubtract::subtractCW(int ntraces, TGraph ** g, double dt, int pad_len, int * bad_idxs, double thres, int ant, const double * w, const SineSubtractResult* result) 
+void FFTtools::SineSubtract::subtractCW(int ntraces, TGraph ** g, double dt, int pad_len, int * bad_idxs, int bad_len, double thres, int ant, const double * w, const SineSubtractResult* result) 
 {
 
 
@@ -1023,21 +1019,24 @@ void FFTtools::SineSubtract::subtractCW(int ntraces, TGraph ** g, double dt, int
   }
 
   //! counting tries and failes
-  int bads = sizeof(bad_idxs) / sizeof(bad_idxs[0]);
+  int bads = bad_len;
   std::vector<int> nfails(bads);
   while(bads != 0) 
   {
-
     //! pick guess index
     int bad_idx;
-    int bad_idx_idx;
-    for (int b = 0; b < bads; b++) {
+    int bad_idx_idx = -1;
+    for (int b = 0; b < bad_len; b++) {
       if (bad_idxs[b] > -1) {
         bad_idx = bad_idxs[b];
         bad_idx_idx = b;
         break;
       }
     }
+    if (bad_idx_idx == -1) {
+      std::cout<<"No more bad indexs!"<<std::endl;
+      break;
+    }        
 
     //! making fft and pick up guess
     double guess_ph[ntraces];
@@ -1051,7 +1050,7 @@ void FFTtools::SineSubtract::subtractCW(int ntraces, TGraph ** g, double dt, int
       if (bad_idx > 0 && bad_idx < spectrum_N - 1) guess_A *= sqrt(2);
       delete [] the_fft;
     } // got a power estimate for it in ntraces!
-      
+    
     //! minimization
     const double * x[ntraces]; ///< take out all value from Tgraph to array
     const double * y[ntraces];
@@ -1098,7 +1097,24 @@ void FFTtools::SineSubtract::subtractCW(int ntraces, TGraph ** g, double dt, int
     }
 
     //! threhold check
-    double ratio = log10(sub_A) - log10(baseline_fft[ant][bad_idx]);
+    double ratio = 10 * (log10(sub_A / sqrt(2) * sqrt(dt)) - log10(baseline_fft[ant][bad_idx]));
+    /*
+    std::cout<<"!!!!!!!!!!!!!!!!freq_idx: "<<bad_idx<<std::endl;
+    std::cout<<"freqs: "<<guess_f<<std::endl;
+
+    std::cout<<"!!freq_fit: "<<freq_temp<<std::endl;
+    std::cout<<"!!amp_fit: "<<amp_temp[0]<<std::endl;
+    std::cout<<"!!amp_guess: "<<guess_A<<std::endl;
+    std::cout<<"!!amp_sub: "<<sub_A<<std::endl;
+    std::cout<<"!!amp_base: "<<baseline_fft[ant][bad_idx]*sqrt(2)<<std::endl;
+    std::cout<<"!!amp_ratio: "<<sub_A/guess_A<<std::endl;
+
+    std::cout<<"guess_A: "<<10 * log10(guess_A / sqrt(2) * sqrt(dt))<<std::endl; 
+    std::cout<<"sub_A: "<<10 * log10(sub_A / sqrt(2) * sqrt(dt))<<std::endl; 
+    std::cout<<"base: "<<10 * log10(baseline_fft[ant][bad_idx])<<std::endl; 
+    std::cout<<"guess_A - base: "<<10 * (log10(guess_A / sqrt(2) * sqrt(dt)) - log10(baseline_fft[ant][bad_idx]))<<std::endl;
+    std::cout<<"sub_A - base: "<<ratio<<std::endl;
+    */
     if (ratio < thres) {
       bad_idxs[bad_idx_idx] = -1; 
       bads -= 1;
