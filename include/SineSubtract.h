@@ -749,7 +749,7 @@ namespace FFTtools
         unsigned id; 
 
         /** some utility stuff */ 
-        int findMaxFreq(int Nfreq, const double * freq, const double * mag, const int * nfails) const; 
+        int findMaxFreq(int Nfreq, const double * freq, const double * mag, const int * nfails, const int * nskips, double thres, int ant) const; 
         bool allowedFreq(double f, double df) const; 
 
         SineFitter fitter; 

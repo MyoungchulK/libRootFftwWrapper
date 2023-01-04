@@ -867,7 +867,7 @@ FFTtools::SineSubtract::SineSubtract(int fft_len, double base_fft[][16], int max
   baseline_fft.resize(16);
   for (int j = 0; j < 16; j++) {
     for (int i = 0; i < fft_len; i++) {
-      baseline_fft[j].push_back(base_fft[i][j]); 
+      baseline_fft[j].push_back(10 * log10(base_fft[i][j])); 
     }
   }
 
@@ -1020,8 +1020,10 @@ void FFTtools::SineSubtract::subtractCW(int ntraces, TGraph ** g, double dt, int
 
   //! counting tries and failes
   int bads = bad_len;
-  std::vector<int> nfails(bads);
-  while(bads != 0) 
+  std::vector<int> nfails(spectrum_N);
+  std::vector<int> nskips(spectrum_N);
+  int max_i = 0;
+  while(bads != 0 or max_i != -1) 
   {
     //! pick guess index
     int bad_idx;
@@ -1033,24 +1035,36 @@ void FFTtools::SineSubtract::subtractCW(int ntraces, TGraph ** g, double dt, int
         break;
       }
     }
-    if (bad_idx_idx == -1) {
-      std::cout<<"No more bad indexs!"<<std::endl;
-      break;
-    }        
 
     //! making fft and pick up guess
     double guess_ph[ntraces];
     double guess_A = 0;
-    double guess_f = bad_idx * df;
+    double guess_f;
     for (int ti = 0; ti  < ntraces; ti++)
     {
       FFTWComplex * the_fft = FFTtools::doFFT(fin_len, ig[ti]->GetY() + low);
+
+      if (bad_idx_idx == -1) {
+        TGraph * dB_spectra = new TGraph(spectrum_N);
+        for (int i = 0; i < spectrum_N; i++) {
+          dB_spectra->GetX()[i] = df * i;
+          dB_spectra->GetY()[i] = 10 * log10(sqrt(the_fft[i].getAbsSq() / NuseMax * dt));
+        }
+        max_i = findMaxFreq(spectrum_N, dB_spectra->GetX(), dB_spectra->GetY(), &nfails[0], &nskips[0], thres, ant);
+        if (max_i == -1) break;
+        else bad_idx = max_i;
+        delete dB_spectra;
+      }
+
+      guess_f = bad_idx * df;
       guess_ph[ti] = the_fft[bad_idx].getPhase();
       guess_A += sqrt(the_fft[bad_idx].getAbsSq() / NuseMax);
       if (bad_idx > 0 && bad_idx < spectrum_N - 1) guess_A *= sqrt(2);
       delete [] the_fft;
     } // got a power estimate for it in ntraces!
-    
+
+    if (max_i == -1) break;   
+ 
     //! minimization
     const double * x[ntraces]; ///< take out all value from Tgraph to array
     const double * y[ntraces];
@@ -1062,6 +1076,8 @@ void FFTtools::SineSubtract::subtractCW(int ntraces, TGraph ** g, double dt, int
       }
       x[ti] = xy_crop->GetX();
       y[ti] = xy_crop->GetY();
+      //x[ti] = ig[ti]->GetX();
+      //y[ti] = ig[ti]->GetY();
     }
     fitter.setGuess(guess_f, ntraces, guess_ph, guess_A); ///< lots of things are happening inside of this function...
     fitter.doFit(ntraces, Nuse, x,y,w, 0); ///< also here too...
@@ -1087,6 +1103,7 @@ void FFTtools::SineSubtract::subtractCW(int ntraces, TGraph ** g, double dt, int
       for (int i = 0; i < fin_len; i++) {
         if (i < NuseMax) ig[ti]->GetY()[i] -= A * sin(2*TMath::Pi() * freq_temp *ig[ti]->GetX()[i] + phase_temp[ti]);
         else ig[ti]->GetY()[i] = 0;
+        //ig[ti]->GetY()[i] -= A * sin(2*TMath::Pi() * freq_temp *ig[ti]->GetX()[i] + phase_temp[ti]);
       }
     
       //! fft after subtraction
@@ -1097,7 +1114,7 @@ void FFTtools::SineSubtract::subtractCW(int ntraces, TGraph ** g, double dt, int
     }
 
     //! threhold check
-    double ratio = 10 * (log10(sub_A / sqrt(2) * sqrt(dt)) - log10(baseline_fft[ant][bad_idx]));
+    double ratio = 10 * log10(sub_A / sqrt(2) * sqrt(dt)) - baseline_fft[ant][bad_idx];
     /*
     std::cout<<"!!!!!!!!!!!!!!!!freq_idx: "<<bad_idx<<std::endl;
     std::cout<<"freqs: "<<guess_f<<std::endl;
@@ -1116,13 +1133,21 @@ void FFTtools::SineSubtract::subtractCW(int ntraces, TGraph ** g, double dt, int
     std::cout<<"sub_A - base: "<<ratio<<std::endl;
     */
     if (ratio < thres) {
-      bad_idxs[bad_idx_idx] = -1; 
-      bads -= 1;
-    } else {
-      nfails[bad_idx_idx]++;
-      if (nfails[bad_idx_idx] > 2) {
-        bad_idxs[bad_idx_idx] = -1;
+      if (bad_idx_idx != -1) {
+        bad_idxs[bad_idx_idx] = -1; 
         bads -= 1;
+      } else {
+        nskips[bad_idx]++;
+      }
+    } else {
+      nfails[bad_idx]++;
+      if (nfails[bad_idx] > 2) {
+        if (bad_idx_idx != -1) {
+          bad_idxs[bad_idx_idx] = -1;
+          bads -= 1;
+        } else {
+          nskips[bad_idx]++;
+        }
       }
     } 
   }///< end of while loop
@@ -1324,13 +1349,31 @@ static __thread TSpectrum* tspect = 0;
 
 
 
-int FFTtools::SineSubtract::findMaxFreq(int Nfreq, const double * freq, const double * mag, const int * nfails) const
+int FFTtools::SineSubtract::findMaxFreq(int Nfreq, const double * freq, const double * mag, const int * nfails, const int * nskips, double thres, int ant) const
 {
 
   int max_i =-1; 
   double max = 0; 
   double df = freq[1]-freq[0]; 
-       
+
+  if (peak_option == NEIGHBORFACTOR) { // we can just iterate through and do this
+    for (int i = 0; i < Nfreq;i++) {
+      if (nskips[i]) continue;
+      if (!allowedFreq(freq[i],df)) continue;
+
+      double val = mag[i] - baseline_fft[ant][i];
+      if (val < thres) continue;
+
+      double adjval = val;
+      if (nfails[i]) adjval /= pow(1 + nfails[i],nfail_exponent);       
+
+      if (adjval > max) {
+        max = adjval;
+        max_i = i;
+      }
+    }
+  }
+  /*
   if (peak_option == GLOBALMAX || peak_option == NEIGHBORFACTOR)   // we can just iterate through and do this
   {
     for (int i = 0; i < Nfreq;i++)
@@ -1353,7 +1396,7 @@ int FFTtools::SineSubtract::findMaxFreq(int Nfreq, const double * freq, const do
       }
 
       double adjval = val;
-      /* adjust the value */ 
+      // adjust the value
       if (nfails[i]) adjval /= pow(1 + nfails[i],nfail_exponent); 
 
 
@@ -1364,7 +1407,7 @@ int FFTtools::SineSubtract::findMaxFreq(int Nfreq, const double * freq, const do
       }
     }
   }
-
+  */
   else if (peak_option == TSPECTRUM)
   {
 #if ROOT_VERSION_CODE <= ROOT_VERSION(6,0,0)
