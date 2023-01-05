@@ -983,14 +983,14 @@ void FFTtools::SineSubtract::subtractCW(int ntraces, TGraph ** g, double dt, int
   int NuseMax = 0; ///< number of final wf bins 
   for (int ti = 0; ti < ntraces; ti++) {
     //! set t last and number of bins
-    high[ti] = tmax <= 0 || tmax > g[ti]->GetN() ? g[ti]->GetN() : tmax;
+    high[ti] = tmax <= 0 || tmax > g[ti]->GetN() ? g[ti]->GetN() : tmax; ///< do we have a setting for specific time range?
     Nuse[ti] = high[ti] - low;
     if (Nuse[ti] > NuseMax) NuseMax = Nuse[ti];
   }
   int fin_len = pad_len ? pad_len : NuseMax; ///< let set practical wf length we will use
 
   //! f-domain configuration
-  int spectrum_N = pad_len ?  pad_len / 2 + 1 : NuseMax / 2 + 1;
+  int spectrum_N = pad_len ?  pad_len / 2 + 1 : NuseMax / 2 + 1; ///< rfft length
   double df = pad_len ? 1./(pad_len * dt) : 1./(NuseMax * dt);
   r.phases.insert(r.phases.end(),ntraces, std::vector<double>());
   r.phases_errs.insert(r.phases_errs.end(),ntraces, std::vector<double>());
@@ -998,7 +998,7 @@ void FFTtools::SineSubtract::subtractCW(int ntraces, TGraph ** g, double dt, int
   r.amps_errs.insert(r.amps_errs.end(),ntraces, std::vector<double>());
 
   //! wf padding
-  TGraph * gPadded[ntraces]; ///< preparing empty pad for testing subtraction results
+  TGraph * gPadded[ntraces]; ///< preparing empty pad for storing subtraction results
   memset(gPadded,0,sizeof(gPadded));
   for (int ti = 0; ti < ntraces; ti++) {
     if (Nuse[ti] < NuseMax || pad_len > NuseMax) {
@@ -1019,13 +1019,13 @@ void FFTtools::SineSubtract::subtractCW(int ntraces, TGraph ** g, double dt, int
   }
 
   //! counting tries and failes
-  int bads = bad_len;
-  std::vector<int> nfails(spectrum_N);
-  std::vector<int> nskips(spectrum_N);
-  int max_i = 0;
+  int bads = bad_len; ///< numper of bad frequencies
+  std::vector<int> nfails(spectrum_N); ///< number of times when subtraction is not lowring amplitude of fft below threshold in each frequency
+  std::vector<int> nskips(spectrum_N); ///< specific frequency that we tried enough. if element is bigger than 0, we are skipping (giving up) that frequency 
+  int max_i = 0; bad frequency from random search
   while(bads != 0 or max_i != -1) 
   {
-    //! pick guess index
+    //! pick guess index from input bad frequency index
     int bad_idx;
     int bad_idx_idx = -1;
     for (int b = 0; b < bad_len; b++) {
@@ -1044,15 +1044,19 @@ void FFTtools::SineSubtract::subtractCW(int ntraces, TGraph ** g, double dt, int
     {
       FFTWComplex * the_fft = FFTtools::doFFT(fin_len, ig[ti]->GetY() + low);
 
+      //! Do random search after testing input bad frequencies
       if (bad_idx_idx == -1) {
         TGraph * dB_spectra = new TGraph(spectrum_N);
         for (int i = 0; i < spectrum_N; i++) {
           dB_spectra->GetX()[i] = df * i;
-          dB_spectra->GetY()[i] = 10 * log10(sqrt(the_fft[i].getAbsSq() / NuseMax * dt));
+          dB_spectra->GetY()[i] = 10 * log10(sqrt(the_fft[i].getAbsSq() / NuseMax * dt)); ///< save in dB scale
         }
-        max_i = findMaxFreq(spectrum_N, dB_spectra->GetX(), dB_spectra->GetY(), &nfails[0], &nskips[0], thres, ant);
-        if (max_i == -1) break;
-        else bad_idx = max_i;
+        max_i = findMaxFreq(spectrum_N, dB_spectra->GetX(), dB_spectra->GetY(), &nfails[0], &nskips[0], thres, ant); ///< peak finding function
+        if (max_i == -1) break; ///< there is nothing to look around
+        else {
+          bad_idx = max_i;
+          //std::cout<<"urgh... nothing perfect..."<<std::endl;      
+        }
         delete dB_spectra;
       }
 
@@ -1061,14 +1065,14 @@ void FFTtools::SineSubtract::subtractCW(int ntraces, TGraph ** g, double dt, int
       guess_A += sqrt(the_fft[bad_idx].getAbsSq() / NuseMax);
       if (bad_idx > 0 && bad_idx < spectrum_N - 1) guess_A *= sqrt(2);
       delete [] the_fft;
-    } // got a power estimate for it in ntraces!
+    }
 
-    if (max_i == -1) break;   
+    if (max_i == -1) break; ///< there is nothing to look around. stop the while loop  
  
     //! minimization
     const double * x[ntraces]; ///< take out all value from Tgraph to array
     const double * y[ntraces];
-    TGraph * xy_crop = new TGraph(NuseMax);
+    TGraph * xy_crop = new TGraph(NuseMax); ///< trim out zero pad for minimization
     for (int ti = 0; ti < ntraces; ti++) {
       for (int i = 0; i < NuseMax; i++) {
         xy_crop->GetX()[i] = ig[ti]->GetX()[i]+low;
@@ -1084,12 +1088,12 @@ void FFTtools::SineSubtract::subtractCW(int ntraces, TGraph ** g, double dt, int
     delete xy_crop;
 
     //! subtraction
-    //! bring the fit results into earth
+    //! bring down the fit results into earth
     double freq_temp = fitter.getFreq();
     double amp_temp[ntraces];
     double phase_temp[ntraces];
     double sub_A = 0;
-    r.freqs.push_back(freq_temp);
+    r.freqs.push_back(freq_temp); ///< store fit parameters
     r.freqs_errs.push_back(fitter.getFreqErr());
     for (int ti = 0; ti < ntraces; ti++)
     {
@@ -1100,8 +1104,10 @@ void FFTtools::SineSubtract::subtractCW(int ntraces, TGraph ** g, double dt, int
       r.amps[ti].push_back(amp_temp[ti]);
       r.amps_errs[ti].push_back( fitter.getAmpErr()[ti]);
       double A = w ? w[ti] * amp_temp[ti] : amp_temp[ti];
+
+      //! subtraction the fit results as a sine wave
       for (int i = 0; i < fin_len; i++) {
-        if (i < NuseMax) ig[ti]->GetY()[i] -= A * sin(2*TMath::Pi() * freq_temp *ig[ti]->GetX()[i] + phase_temp[ti]);
+        if (i < NuseMax) ig[ti]->GetY()[i] -= A * sin(2*TMath::Pi() * freq_temp *ig[ti]->GetX()[i] + phase_temp[ti]); ///< apply subtraction only in original wf
         else ig[ti]->GetY()[i] = 0;
         //ig[ti]->GetY()[i] -= A * sin(2*TMath::Pi() * freq_temp *ig[ti]->GetX()[i] + phase_temp[ti]);
       }
@@ -1114,7 +1120,7 @@ void FFTtools::SineSubtract::subtractCW(int ntraces, TGraph ** g, double dt, int
     }
 
     //! threhold check
-    double ratio = 10 * log10(sub_A / sqrt(2) * sqrt(dt)) - baseline_fft[ant][bad_idx];
+    double ratio = 10 * log10(sub_A / sqrt(2) * sqrt(dt)) - baseline_fft[ant][bad_idx]; ///< do it in dB scale
     /*
     std::cout<<"!!!!!!!!!!!!!!!!freq_idx: "<<bad_idx<<std::endl;
     std::cout<<"freqs: "<<guess_f<<std::endl;
@@ -1133,6 +1139,7 @@ void FFTtools::SineSubtract::subtractCW(int ntraces, TGraph ** g, double dt, int
     std::cout<<"sub_A - base: "<<ratio<<std::endl;
     */
     if (ratio < thres) {
+      //! if it is subtracted well, exclude bad freqeuncy that we just used
       if (bad_idx_idx != -1) {
         bad_idxs[bad_idx_idx] = -1; 
         bads -= 1;
@@ -1140,13 +1147,15 @@ void FFTtools::SineSubtract::subtractCW(int ntraces, TGraph ** g, double dt, int
         nskips[bad_idx]++;
       }
     } else {
+      //! if it didnt work well, give bad freqeuncy to another chance. But within penalty 
       nfails[bad_idx]++;
-      if (nfails[bad_idx] > 2) {
+      if (nfails[bad_idx] > 2) { ///< had enough. Lets give up
         if (bad_idx_idx != -1) {
           bad_idxs[bad_idx_idx] = -1;
           bads -= 1;
         } else {
           nskips[bad_idx]++;
+          //std::cout<<"dont try me again!"<<std::endl;
         }
       }
     } 
