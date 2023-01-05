@@ -1022,7 +1022,7 @@ void FFTtools::SineSubtract::subtractCW(int ntraces, TGraph ** g, double dt, int
   int bads = bad_len; ///< numper of bad frequencies
   std::vector<int> nfails(spectrum_N); ///< number of times when subtraction is not lowring amplitude of fft below threshold in each frequency
   std::vector<int> nskips(spectrum_N); ///< specific frequency that we tried enough. if element is bigger than 0, we are skipping (giving up) that frequency 
-  int max_i = 0; bad frequency from random search
+  int max_i = 0; ///< bad frequency from random search
   while(bads != 0 or max_i != -1) 
   {
     //! pick guess index from input bad frequency index
